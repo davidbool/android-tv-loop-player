@@ -8,5 +8,5 @@ Push images here: adb push &lt;file&gt; "%1$s/"</string>
     <string name="image_directory_error">Unable to access image folder:
 %1$s
 Push images here: adb push &lt;file&gt; "%2$s/"</string>
-    <string name="image_debug_position">%1$d/%2$d</string>
+    <string name="image_debug_status">source: %1$s • %2$d/%3$d</string>
 </resources>
