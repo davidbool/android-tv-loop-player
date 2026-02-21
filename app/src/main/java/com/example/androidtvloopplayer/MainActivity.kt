@@ -20,15 +20,41 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
+import java.net.NetworkInterface
+import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var imageView: ImageView
     private lateinit var overlayText: TextView
     private lateinit var debugOverlayText: TextView
+    private lateinit var remoteOverlayText: TextView
 
     private var imageLoopJob: Job? = null
     private var currentImageIndex = 0
+    private var currentPlaybackItems: List<PlaybackItem> = emptyList()
+    private var currentSourceLabel: String = PLAYBACK_SOURCE_FOLDER
+    private var isPaused = false
+
+    private val pinCode: String = (1000 + Random.nextInt(9000)).toString()
+    private var remoteServerPort: Int? = null
+    private val remoteServer = LocalHttpRemoteServer(
+        scope = lifecycleScope,
+        pin = pinCode,
+        onCommand = { command ->
+            runOnUiThread {
+                handleRemoteCommand(command)
+            }
+        },
+        onServerReady = { port ->
+            remoteServerPort = port
+            runOnUiThread { updateRemoteOverlay() }
+        },
+        onServerStopped = {
+            remoteServerPort = null
+            runOnUiThread { updateRemoteOverlay() }
+        }
+    )
 
     private data class PlaybackItem(
         val file: File,
@@ -50,10 +76,12 @@ class MainActivity : AppCompatActivity() {
         imageView = findViewById(R.id.mainImageView)
         overlayText = findViewById(R.id.overlayText)
         debugOverlayText = findViewById(R.id.debugOverlayText)
+        remoteOverlayText = findViewById(R.id.remoteOverlayText)
 
         val startupDir = File(getExternalFilesDir(null), IMAGE_DIRECTORY_NAME)
         Log.d(TAG, "Image directory path: ${startupDir.absolutePath}")
 
+        updateRemoteOverlay()
         hideSystemUi()
     }
 
@@ -61,11 +89,13 @@ class MainActivity : AppCompatActivity() {
         super.onStart()
         hideSystemUi()
         startImageLoop()
+        remoteServer.start()
     }
 
     override fun onStop() {
         imageLoopJob?.cancel()
         imageLoopJob = null
+        remoteServer.stop()
         super.onStop()
     }
 
@@ -74,6 +104,17 @@ class MainActivity : AppCompatActivity() {
         if (hasFocus) {
             hideSystemUi()
         }
+    }
+
+    private fun handleRemoteCommand(command: RemoteCommand) {
+        when (command) {
+            RemoteCommand.RELOAD -> startImageLoop()
+            RemoteCommand.NEXT -> showNextImage()
+            RemoteCommand.PREV -> showPreviousImage()
+            RemoteCommand.PAUSE -> isPaused = true
+            RemoteCommand.PLAY -> isPaused = false
+        }
+        updateDebugOverlay()
     }
 
     private fun startImageLoop() {
@@ -139,6 +180,7 @@ class MainActivity : AppCompatActivity() {
                     lookupResult.directoryPath
                 )
                 overlayText.visibility = View.VISIBLE
+                currentPlaybackItems = emptyList()
                 return@launch
             }
 
@@ -147,35 +189,111 @@ class MainActivity : AppCompatActivity() {
                 debugOverlayText.visibility = View.GONE
                 overlayText.text = getString(R.string.no_images_found_with_path, lookupResult.directoryPath)
                 overlayText.visibility = View.VISIBLE
+                currentPlaybackItems = emptyList()
                 return@launch
             }
 
             overlayText.visibility = View.GONE
-            val playbackItems = lookupResult.playbackItems
-            if (currentImageIndex >= playbackItems.size) {
+            currentPlaybackItems = lookupResult.playbackItems
+            currentSourceLabel = lookupResult.sourceLabel
+            isPaused = false
+
+            if (currentImageIndex >= currentPlaybackItems.size) {
                 currentImageIndex = 0
             }
 
+            showImageAtCurrentIndex()
+
             while (isActive) {
-                val currentItem = playbackItems[currentImageIndex]
-                val decodedBitmap = withContext(Dispatchers.IO) {
-                    decodeSampledBitmap(currentItem.file, imageView.width, imageView.height)
+                if (isPaused) {
+                    delay(PAUSE_POLL_INTERVAL_MS)
+                    continue
                 }
 
-                if (decodedBitmap != null) {
-                    imageView.setImageBitmap(decodedBitmap)
-                    debugOverlayText.text = getString(
-                        R.string.image_debug_status,
-                        lookupResult.sourceLabel,
-                        currentImageIndex + 1,
-                        playbackItems.size
-                    )
-                    debugOverlayText.visibility = View.VISIBLE
+                val durationMs = currentPlaybackItems[currentImageIndex].durationMs
+                delay(durationMs)
+                if (!isActive || isPaused || currentPlaybackItems.isEmpty()) {
+                    continue
                 }
 
-                currentImageIndex = (currentImageIndex + 1) % playbackItems.size
-                delay(currentItem.durationMs)
+                currentImageIndex = (currentImageIndex + 1) % currentPlaybackItems.size
+                showImageAtCurrentIndex()
             }
+        }
+    }
+
+    private fun showNextImage() {
+        if (currentPlaybackItems.isEmpty()) {
+            return
+        }
+        currentImageIndex = (currentImageIndex + 1) % currentPlaybackItems.size
+        showImageAtCurrentIndex()
+    }
+
+    private fun showPreviousImage() {
+        if (currentPlaybackItems.isEmpty()) {
+            return
+        }
+        currentImageIndex = (currentImageIndex - 1 + currentPlaybackItems.size) % currentPlaybackItems.size
+        showImageAtCurrentIndex()
+    }
+
+    private fun showImageAtCurrentIndex() {
+        if (currentPlaybackItems.isEmpty()) {
+            return
+        }
+
+        val item = currentPlaybackItems[currentImageIndex]
+        lifecycleScope.launch {
+            val decodedBitmap = withContext(Dispatchers.IO) {
+                decodeSampledBitmap(item.file, imageView.width, imageView.height)
+            }
+            if (decodedBitmap != null) {
+                imageView.setImageBitmap(decodedBitmap)
+                updateDebugOverlay()
+            }
+        }
+    }
+
+    private fun updateDebugOverlay() {
+        if (currentPlaybackItems.isEmpty()) {
+            debugOverlayText.visibility = View.GONE
+            return
+        }
+
+        debugOverlayText.text = getString(
+            R.string.image_debug_status,
+            currentSourceLabel,
+            currentImageIndex + 1,
+            currentPlaybackItems.size,
+            if (isPaused) getString(R.string.playback_state_paused) else getString(R.string.playback_state_playing)
+        )
+        debugOverlayText.visibility = View.VISIBLE
+    }
+
+    private fun updateRemoteOverlay() {
+        val ipAddress = resolveLocalIpv4Address()
+        val port = remoteServerPort
+
+        remoteOverlayText.text = if (ipAddress != null && port != null) {
+            getString(R.string.remote_overlay_ready, ipAddress, port, pinCode)
+        } else {
+            getString(R.string.remote_overlay_starting, pinCode)
+        }
+    }
+
+    private fun resolveLocalIpv4Address(): String? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+            interfaces
+                .filter { it.isUp && !it.isLoopback }
+                .flatMap { it.inetAddresses.toList() }
+                .firstOrNull { address ->
+                    !address.isLoopbackAddress && address.hostAddress?.contains(':') == false
+                }
+                ?.hostAddress
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -283,5 +401,6 @@ class MainActivity : AppCompatActivity() {
         private const val DEFAULT_ITEM_DURATION_MS = 5_000L
         private const val MIN_ITEM_DURATION_MS = 1_000L
         private const val MAX_ITEM_DURATION_MS = 60_000L
+        private const val PAUSE_POLL_INTERVAL_MS = 250L
     }
 }
