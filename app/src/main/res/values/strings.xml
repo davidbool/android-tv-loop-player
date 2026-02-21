@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">TV Loop Player</string>
+    <string name="placeholder_image_description">No image selected</string>
+    <string name="no_images_found">No images found in advision_demo</string>
+    <string name="no_images_found_with_path">No images found in advision_demo
+%1$s
+Push images here: adb push &lt;file&gt; "%1$s/"</string>
+    <string name="image_directory_error">Unable to access image folder:
+%1$s
+Push images here: adb push &lt;file&gt; "%2$s/"</string>
+</resources>
