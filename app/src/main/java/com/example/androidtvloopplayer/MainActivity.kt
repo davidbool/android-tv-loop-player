@@ -13,6 +13,9 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -21,9 +24,13 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var imageView: ImageView
     private lateinit var overlayText: TextView
+    private lateinit var debugOverlayText: TextView
+
+    private var imageLoopJob: Job? = null
+    private var currentImageIndex = 0
 
     private data class ImageLookupResult(
-        val firstImage: File?,
+        val imageFiles: List<File>,
         val directoryPath: String,
         val directoryError: Boolean
     )
@@ -35,12 +42,24 @@ class MainActivity : AppCompatActivity() {
 
         imageView = findViewById(R.id.mainImageView)
         overlayText = findViewById(R.id.overlayText)
+        debugOverlayText = findViewById(R.id.debugOverlayText)
 
         val startupDir = File(getExternalFilesDir(null), IMAGE_DIRECTORY_NAME)
         Log.d(TAG, "Image directory path: ${startupDir.absolutePath}")
 
         hideSystemUi()
-        loadFirstImage()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        hideSystemUi()
+        startImageLoop()
+    }
+
+    override fun onStop() {
+        imageLoopJob?.cancel()
+        imageLoopJob = null
+        super.onStop()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -50,13 +69,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadFirstImage() {
-        lifecycleScope.launch {
+    private fun startImageLoop() {
+        imageLoopJob?.cancel()
+        imageLoopJob = lifecycleScope.launch {
             val lookupResult = withContext(Dispatchers.IO) {
                 val imageDir = File(getExternalFilesDir(null), IMAGE_DIRECTORY_NAME)
                 if (!imageDir.exists() && !imageDir.mkdirs()) {
                     return@withContext ImageLookupResult(
-                        firstImage = null,
+                        imageFiles = emptyList(),
                         directoryPath = imageDir.absolutePath,
                         directoryError = true
                     )
@@ -64,22 +84,22 @@ class MainActivity : AppCompatActivity() {
 
                 if (!imageDir.isDirectory) {
                     return@withContext ImageLookupResult(
-                        firstImage = null,
+                        imageFiles = emptyList(),
                         directoryPath = imageDir.absolutePath,
                         directoryError = true
                     )
                 }
 
-                val firstImage = imageDir
+                val imageFiles = imageDir
                     .listFiles { file ->
                         file.isFile && (file.extension.equals("jpg", ignoreCase = true) ||
                             file.extension.equals("png", ignoreCase = true))
                     }
                     ?.sortedBy { it.name.lowercase() }
-                    ?.firstOrNull()
+                    ?: emptyList()
 
                 ImageLookupResult(
-                    firstImage = firstImage,
+                    imageFiles = imageFiles,
                     directoryPath = imageDir.absolutePath,
                     directoryError = false
                 )
@@ -87,6 +107,7 @@ class MainActivity : AppCompatActivity() {
 
             if (lookupResult.directoryError) {
                 imageView.setImageDrawable(null)
+                debugOverlayText.visibility = View.GONE
                 overlayText.text = getString(
                     R.string.image_directory_error,
                     lookupResult.directoryPath,
@@ -96,24 +117,38 @@ class MainActivity : AppCompatActivity() {
                 return@launch
             }
 
-            if (lookupResult.firstImage == null) {
+            if (lookupResult.imageFiles.isEmpty()) {
                 imageView.setImageDrawable(null)
+                debugOverlayText.visibility = View.GONE
                 overlayText.text = getString(R.string.no_images_found_with_path, lookupResult.directoryPath)
                 overlayText.visibility = View.VISIBLE
                 return@launch
             }
 
-            val decodedBitmap = withContext(Dispatchers.IO) {
-                decodeSampledBitmap(lookupResult.firstImage, imageView.width, imageView.height)
+            overlayText.visibility = View.GONE
+            val imageFiles = lookupResult.imageFiles
+            if (currentImageIndex >= imageFiles.size) {
+                currentImageIndex = 0
             }
 
-            if (decodedBitmap != null) {
-                imageView.setImageBitmap(decodedBitmap)
-                overlayText.visibility = View.GONE
-            } else {
-                imageView.setImageDrawable(null)
-                overlayText.text = getString(R.string.no_images_found_with_path, lookupResult.directoryPath)
-                overlayText.visibility = View.VISIBLE
+            while (isActive) {
+                val currentImage = imageFiles[currentImageIndex]
+                val decodedBitmap = withContext(Dispatchers.IO) {
+                    decodeSampledBitmap(currentImage, imageView.width, imageView.height)
+                }
+
+                if (decodedBitmap != null) {
+                    imageView.setImageBitmap(decodedBitmap)
+                    debugOverlayText.text = getString(
+                        R.string.image_debug_position,
+                        currentImageIndex + 1,
+                        imageFiles.size
+                    )
+                    debugOverlayText.visibility = View.VISIBLE
+                }
+
+                currentImageIndex = (currentImageIndex + 1) % imageFiles.size
+                delay(IMAGE_ROTATION_INTERVAL_MS)
             }
         }
     }
@@ -141,8 +176,8 @@ class MainActivity : AppCompatActivity() {
         var inSampleSize = 1
 
         if (height > reqHeight || width > reqWidth) {
-            var halfHeight = height / 2
-            var halfWidth = width / 2
+            val halfHeight = height / 2
+            val halfWidth = width / 2
 
             while ((halfHeight / inSampleSize) >= reqHeight && (halfWidth / inSampleSize) >= reqWidth) {
                 inSampleSize *= 2
@@ -171,5 +206,6 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "MainActivity"
         private const val IMAGE_DIRECTORY_NAME = "advision_demo"
+        private const val IMAGE_ROTATION_INTERVAL_MS = 5_000L
     }
 }
