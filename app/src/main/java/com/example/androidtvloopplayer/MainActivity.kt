@@ -3,6 +3,7 @@ package com.example.androidtvloopplayer
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.widget.ImageView
 import android.widget.TextView
@@ -21,6 +22,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imageView: ImageView
     private lateinit var overlayText: TextView
 
+    private data class ImageLookupResult(
+        val firstImage: File?,
+        val directoryPath: String,
+        val directoryError: Boolean
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -28,6 +35,9 @@ class MainActivity : AppCompatActivity() {
 
         imageView = findViewById(R.id.mainImageView)
         overlayText = findViewById(R.id.overlayText)
+
+        val startupDir = File(getExternalFilesDir(null), IMAGE_DIRECTORY_NAME)
+        Log.d(TAG, "Image directory path: ${startupDir.absolutePath}")
 
         hideSystemUi()
         loadFirstImage()
@@ -42,29 +52,59 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadFirstImage() {
         lifecycleScope.launch {
-            val firstImage = withContext(Dispatchers.IO) {
-                val imageDir = File(getExternalFilesDir(null), "advision_demo")
-                if (!imageDir.exists() || !imageDir.isDirectory) {
-                    return@withContext null
+            val lookupResult = withContext(Dispatchers.IO) {
+                val imageDir = File(getExternalFilesDir(null), IMAGE_DIRECTORY_NAME)
+                if (!imageDir.exists() && !imageDir.mkdirs()) {
+                    return@withContext ImageLookupResult(
+                        firstImage = null,
+                        directoryPath = imageDir.absolutePath,
+                        directoryError = true
+                    )
                 }
 
-                imageDir
+                if (!imageDir.isDirectory) {
+                    return@withContext ImageLookupResult(
+                        firstImage = null,
+                        directoryPath = imageDir.absolutePath,
+                        directoryError = true
+                    )
+                }
+
+                val firstImage = imageDir
                     .listFiles { file ->
                         file.isFile && (file.extension.equals("jpg", ignoreCase = true) ||
                             file.extension.equals("png", ignoreCase = true))
                     }
                     ?.sortedBy { it.name.lowercase() }
                     ?.firstOrNull()
+
+                ImageLookupResult(
+                    firstImage = firstImage,
+                    directoryPath = imageDir.absolutePath,
+                    directoryError = false
+                )
             }
 
-            if (firstImage == null) {
+            if (lookupResult.directoryError) {
                 imageView.setImageDrawable(null)
+                overlayText.text = getString(
+                    R.string.image_directory_error,
+                    lookupResult.directoryPath,
+                    lookupResult.directoryPath
+                )
+                overlayText.visibility = View.VISIBLE
+                return@launch
+            }
+
+            if (lookupResult.firstImage == null) {
+                imageView.setImageDrawable(null)
+                overlayText.text = getString(R.string.no_images_found_with_path, lookupResult.directoryPath)
                 overlayText.visibility = View.VISIBLE
                 return@launch
             }
 
             val decodedBitmap = withContext(Dispatchers.IO) {
-                decodeSampledBitmap(firstImage, imageView.width, imageView.height)
+                decodeSampledBitmap(lookupResult.firstImage, imageView.width, imageView.height)
             }
 
             if (decodedBitmap != null) {
@@ -72,6 +112,7 @@ class MainActivity : AppCompatActivity() {
                 overlayText.visibility = View.GONE
             } else {
                 imageView.setImageDrawable(null)
+                overlayText.text = getString(R.string.no_images_found_with_path, lookupResult.directoryPath)
                 overlayText.visibility = View.VISIBLE
             }
         }
@@ -125,5 +166,10 @@ class MainActivity : AppCompatActivity() {
                 View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
                 View.SYSTEM_UI_FLAG_FULLSCREEN or
                 View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    companion object {
+        private const val TAG = "MainActivity"
+        private const val IMAGE_DIRECTORY_NAME = "advision_demo"
     }
 }
